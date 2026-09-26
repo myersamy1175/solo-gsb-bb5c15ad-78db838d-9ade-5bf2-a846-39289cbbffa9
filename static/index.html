@@ -148,6 +148,25 @@
     <section id="tab-history" class="tab-panel">
       <h2>历史审查</h2>
       <p class="result-meta">最近 100 条记录，保存在服务器端 SQLite 中。</p>
+
+      <!-- 破坏项对账 -->
+      <div class="reconcile-panel">
+        <div class="reconcile-head">
+          <h3>⚖️ 破坏项对账</h3>
+          <p class="result-meta">
+            选一条已保存审查作基线，与当前打开的审查比较：后端按「端点 + 方向 + 规则 + 语义定位」构造稳定身份
+            （忽略发现 ID 与顺序），同身份重复发现按出现次数一一配对，输出新增 / 延续 / 已消失三类破坏项。
+          </p>
+        </div>
+        <div class="reconcile-controls">
+          <span class="reconcile-current">当前审查：<b id="reconcile-current">（尚未打开审查）</b></span>
+          <select id="reconcile-baseline"><option value="">选择基线审查…</option></select>
+          <button id="reconcile-run" class="primary-btn">开始对账</button>
+        </div>
+        <div id="reconcile-banner" class="banner error hidden"></div>
+        <div id="reconcile-result"></div>
+      </div>
+
       <table class="history-table">
         <thead>
           <tr><th>#</th><th>时间</th><th>标题</th><th>版本变化</th><th>破坏性</th><th>总数</th><th></th></tr>

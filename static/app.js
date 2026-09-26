@@ -14,6 +14,7 @@
     groups: null,          // 聚合结果缓存（按当前审查）
     groupsMeta: null,
     groupsPromise: null,   // 进行中的聚合请求（防重复拉取）
+    reconcile: null,       // 最近一次破坏项对账结果
   };
 
   const SEV_LABEL = {
@@ -36,14 +37,15 @@
   // ------------------------------------------------------------------ //
   // Tab 切换
   // ------------------------------------------------------------------ //
+  function switchToTab(name) {
+    $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+    $$(".tab-panel").forEach((p) =>
+      p.classList.toggle("active", p.id === `tab-${name}`));
+    if (name === "history") loadHistory();
+  }
+
   $$(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      $$(".tab").forEach((t) => t.classList.remove("active"));
-      $$(".tab-panel").forEach((p) => p.classList.remove("active"));
-      tab.classList.add("active");
-      $(`#tab-${tab.dataset.tab}`).classList.add("active");
-      if (tab.dataset.tab === "history") loadHistory();
-    });
+    tab.addEventListener("click", () => switchToTab(tab.dataset.tab));
   });
 
   // ------------------------------------------------------------------ //
@@ -187,6 +189,7 @@
     renderCurrentView();
     loadPointers();
     loadTree();
+    syncReconcileCurrent();
   }
 
   function renderStats() {
@@ -763,6 +766,16 @@
       const data = await resp.json();
       const items = data.items || [];
       $("#history-empty").classList.toggle("hidden", items.length > 0);
+      syncReconcileCurrent();
+      // 基线选择器：保留已选项（若对应审查仍存在）
+      const sel = $("#reconcile-baseline");
+      const prevBaseline = sel.value;
+      sel.innerHTML = `<option value="">选择基线审查…</option>` +
+        items.map((it) =>
+          `<option value="${it.id}">#${it.id} · ${escapeHtml(it.title || "未命名")}` +
+          `（${escapeHtml(it.created_at || "")}）</option>`
+        ).join("");
+      sel.value = items.some((it2) => String(it2.id) === prevBaseline) ? prevBaseline : "";
       body.innerHTML = items.map((it) => {
         const c = it.summary.counts || {};
         return `
@@ -777,6 +790,7 @@
           <td>${it.summary.total}</td>
           <td>
             <button class="link-btn" data-open="${it.id}">打开</button>
+            <button class="link-btn" data-reconcile="${it.id}">对账</button>
             <button class="link-btn" data-md="${it.id}">MD</button>
             <button class="link-btn" data-del="${it.id}">删除</button>
           </td>
@@ -788,11 +802,15 @@
           const review = await (await fetch(`/api/reviews/${b.dataset.open}`)).json();
           state.review = review;
           state.filter = { severity: "all", direction: "all", category: "all", text: "" };
-          $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === "review"));
-          $$(".tab-panel").forEach((p) =>
-            p.classList.toggle("active", p.id === "tab-review"));
+          switchToTab("review");
           renderResult();
           window.scrollTo({ top: 0, behavior: "smooth" });
+        }));
+      body.querySelectorAll("[data-reconcile]").forEach((b) =>
+        b.addEventListener("click", () => {
+          $("#reconcile-baseline").value = b.dataset.reconcile;
+          $(".reconcile-panel").scrollIntoView({ block: "start", behavior: "smooth" });
+          runReconcile();
         }));
       body.querySelectorAll("[data-md]").forEach((b) =>
         b.addEventListener("click", () => {
@@ -808,6 +826,169 @@
       body.innerHTML = `<tr><td colspan="7" style="color:var(--breaking)">加载失败：${escapeHtml(err.message)}</td></tr>`;
     }
   }
+
+  // ------------------------------------------------------------------ //
+  // 破坏项对账（历史页：基线审查 vs 当前审查）
+  // ------------------------------------------------------------------ //
+  const REC_KIND = {
+    added: { icon: "🆕", label: "新增" },
+    continuing: { icon: "🔁", label: "延续" },
+    disappeared: { icon: "✅", label: "已消失" },
+  };
+
+  function syncReconcileCurrent() {
+    const el = $("#reconcile-current");
+    if (!el) return;
+    el.textContent = state.review && state.review.id
+      ? `#${state.review.id} · ${state.review.title || "未命名"}`
+      : "（尚未打开审查）";
+  }
+
+  function showReconcileError(msg) {
+    const el = $("#reconcile-banner");
+    el.textContent = msg;
+    el.classList.remove("hidden");
+  }
+
+  async function runReconcile() {
+    const banner = $("#reconcile-banner");
+    const resultBox = $("#reconcile-result");
+    banner.classList.add("hidden");
+    resultBox.innerHTML = "";
+
+    if (!state.review || !state.review.id) {
+      showReconcileError("请先在下方历史记录中「打开」一条审查（或先执行一次新审查）作为当前审查，再选择基线对账。");
+      return;
+    }
+    const baselineId = Number($("#reconcile-baseline").value);
+    if (!baselineId) {
+      showReconcileError("请选择一条已保存的审查作为基线。");
+      return;
+    }
+    if (baselineId === state.review.id) {
+      showReconcileError(`基线与当前审查相同（#${baselineId}），对账没有意义——请另选一条历史审查作为基线。`);
+      return;
+    }
+
+    const btn = $("#reconcile-run");
+    btn.disabled = true;
+    btn.textContent = "对账中…";
+    try {
+      const resp = await fetch(
+        `/api/reviews/${state.review.id}/reconcile?baseline_id=${baselineId}`);
+      const data = await resp.json();
+      if (!resp.ok) {
+        showReconcileError(data.detail || `对账失败（HTTP ${resp.status}）`);
+        return;
+      }
+      state.reconcile = data;
+      renderReconcile(data);
+    } catch (err) {
+      showReconcileError(`对账请求失败：${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "开始对账";
+    }
+  }
+
+  function renderReconcile(data) {
+    const box = $("#reconcile-result");
+    const s = data.summary;
+    const head = `
+      <div class="reconcile-summary">
+        <div class="rec-stat added"><div class="num">${s.added}</div><div class="label">🆕 新增破坏项</div></div>
+        <div class="rec-stat continuing"><div class="num">${s.continuing}</div><div class="label">🔁 延续破坏项</div></div>
+        <div class="rec-stat disappeared"><div class="num">${s.disappeared}</div><div class="label">✅ 已消失破坏项</div></div>
+      </div>
+      <p class="result-meta">
+        当前审查 #${data.current.id}（${s.current_breaking} 项破坏） vs
+        基线审查 #${data.baseline.id}（${s.baseline_breaking} 项破坏） ·
+        稳定身份 = 端点 + 方向 + 规则 + 语义定位，同身份按出现次数一一配对
+      </p>`;
+
+    if (!s.added && !s.continuing && !s.disappeared) {
+      box.innerHTML = head + `<div class="empty-hint">两次审查均无破坏性发现，无需对账。</div>`;
+      return;
+    }
+
+    const cols = ["added", "continuing", "disappeared"].map((kind) => {
+      const items = data[kind] || [];
+      const meta = REC_KIND[kind];
+      const body = items.length
+        ? items.map((e) => recItemHtml(e)).join("")
+        : `<div class="rec-empty">无</div>`;
+      return `<div class="reconcile-col ${kind}">
+        <div class="rec-col-head">${meta.icon} ${meta.label}（${items.length}）</div>
+        ${body}
+      </div>`;
+    }).join("");
+    box.innerHTML = head + `<div class="reconcile-columns">${cols}</div>`;
+
+    box.querySelectorAll("[data-jump-current]").forEach((b) =>
+      b.addEventListener("click", () =>
+        jumpToFinding(data.current.id, Number(b.dataset.jumpCurrent))));
+    box.querySelectorAll("[data-jump-baseline]").forEach((b) =>
+      b.addEventListener("click", () =>
+        jumpToFinding(data.baseline.id, Number(b.dataset.jumpBaseline))));
+  }
+
+  function recItemHtml(e) {
+    const f = e.finding || {};
+    const curBtn = e.current_finding_id != null
+      ? `<button class="mini-link rec-jump" data-jump-current="${e.current_finding_id}"
+          title="切到审查页，定位当前审查中的该发现">↗ 当前 #${e.current_finding_id}</button>` : "";
+    const baseBtn = e.baseline_finding_id != null
+      ? `<button class="mini-link rec-jump" data-jump-baseline="${e.baseline_finding_id}"
+          title="打开基线审查，定位该发现">↗ 基线 #${e.baseline_finding_id}</button>` : "";
+    return `
+    <div class="rec-item">
+      <div class="rec-msg">${escapeHtml(f.message || "")}</div>
+      ${f.endpoint ? `<span class="finding-endpoint">${escapeHtml(f.endpoint)}</span>` : ""}
+      <div class="rec-loc">📍 ${escapeHtml(f.location || "")}</div>
+      <div class="rec-meta">
+        <span class="rule-id">${escapeHtml(f.rule_id || "")}</span>
+        ${curBtn}${baseBtn}
+      </div>
+    </div>`;
+  }
+
+  /** 跳到某次审查中的指定发现：切到审查页、清筛选、展开并高亮目标卡片。 */
+  async function jumpToFinding(reviewId, findingId) {
+    if (!state.review || state.review.id !== reviewId) {
+      let review;
+      try {
+        const resp = await fetch(`/api/reviews/${reviewId}`);
+        if (!resp.ok) {
+          showReconcileError(`审查 #${reviewId} 已不存在或无法读取，无法定位该发现。`);
+          return;
+        }
+        review = await resp.json();
+      } catch (err) {
+        showReconcileError(`定位失败：${err.message}`);
+        return;
+      }
+      state.review = review;
+      state.filter = { severity: "all", direction: "all", category: "all", text: "" };
+      renderResult();
+    }
+    switchToTab("review");
+    // 逐条视图 + 清空筛选，确保目标发现一定可见
+    state.view = "flat";
+    $$("#view-toggle .toggle-btn").forEach((b) =>
+      b.classList.toggle("active", b.dataset.view === "flat"));
+    state.filter = { severity: "all", direction: "all", category: "all", text: "" };
+    syncFilterControls();
+    state.expandedFinding = findingId;
+    renderFindings();
+    const card = document.querySelector(`#findings-list .finding[data-id="${findingId}"]`);
+    if (card) {
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+      card.classList.add("flash");
+      setTimeout(() => card.classList.remove("flash"), 2400);
+    }
+  }
+
+  $("#reconcile-run").addEventListener("click", runReconcile);
 
   // ------------------------------------------------------------------ //
   // 规则说明（静态内容，与后端规则保持同步）
