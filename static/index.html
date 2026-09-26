@@ -155,6 +155,23 @@
         <tbody id="history-body"></tbody>
       </table>
       <div id="history-empty" class="empty-hint">暂无历史记录。</div>
+
+      <!-- 破坏项对账 -->
+      <div class="reconcile-panel">
+        <h2>破坏项对账</h2>
+        <p class="result-meta">
+          选一条已保存审查作<b>基线</b>，与<b>当前审查</b>（审查页正在查看的记录）比较 🔴 破坏性发现的演化：
+          按端点 / 方向 / 规则 / 语义定位构造稳定身份（忽略发现 ID 与列表顺序，同身份重复项按出现次数一一配对），
+          输出新增、延续、已消失三类。
+        </p>
+        <div class="reconcile-controls">
+          <span class="reconcile-current" id="reconcile-current">当前审查：未加载</span>
+          <select id="baseline-select"><option value="">选择基线审查…</option></select>
+          <button id="reconcile-btn" class="primary-btn">开始对账</button>
+        </div>
+        <div id="reconcile-status" class="banner error hidden"></div>
+        <div id="reconcile-result"></div>
+      </div>
     </section>
 
     <!-- ===================== 规则说明面板 ===================== -->

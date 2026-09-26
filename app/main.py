@@ -1,4 +1,4 @@
-"""FastAPI 入口：审查、历史、引用展开树、根因聚合、报告下载、最小复现包导出。"""
+"""FastAPI 入口：审查、历史、引用展开树、根因聚合、破坏项对账、报告下载、最小复现包导出。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import database, groups, reports, repro
+from . import database, groups, reconcile, reports, repro
 from .diff import run_diff, summarize
 from .parser import SpecParseError, load_spec
 from .refs import build_ref_tree, expand_path_to_pointer, list_root_pointers
@@ -120,6 +120,44 @@ def remove_review(review_id: int) -> Response:
     if not database.delete_review(review_id):
         raise HTTPException(status_code=404, detail="审查记录不存在")
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------- #
+# 破坏项对账（基线审查 vs 当前审查）
+# ---------------------------------------------------------------------- #
+def _review_brief(review: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": review.get("id"),
+        "title": review.get("title"),
+        "created_at": review.get("created_at"),
+        "old_version": review.get("old_version"),
+        "new_version": review.get("new_version"),
+    }
+
+
+@app.get("/api/reviews/{review_id}/reconcile")
+def reconcile_review(review_id: int, baseline_id: int) -> dict[str, Any]:
+    """以 baseline_id 为基线，与当前审查 review_id 对账破坏性发现。"""
+    if baseline_id == review_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"基线与当前审查相同（#{review_id}），请选择另一条历史审查作为基线。",
+        )
+    current = database.get_review(review_id)
+    if current is None:
+        raise HTTPException(
+            status_code=404, detail=f"当前审查 #{review_id} 不存在或已被删除。"
+        )
+    baseline = database.get_review(baseline_id)
+    if baseline is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"基线审查 #{baseline_id} 不存在或已被删除，请重新选择基线。",
+        )
+    result = reconcile.reconcile_breaking(baseline["findings"], current["findings"])
+    result["baseline"] = _review_brief(baseline)
+    result["current"] = _review_brief(current)
+    return result
 
 
 # ---------------------------------------------------------------------- #
